@@ -242,7 +242,7 @@ local function init_patterns()
 end
 
 -- Seed bank 1 with a funky LCD/Flea-inspired groove
-local function seed_groove(bank)
+function seed_groove(bank)
   local r = root_note
   local p5 = root_note + 7
   local m3 = root_note + 3
@@ -276,9 +276,6 @@ local function seed_groove(bank)
     live_patterns[bank][s] = deep_copy(home_patterns[bank][s])
   end
 end
-
--- forward declaration fix
-seed_groove = seed_groove
 
 ----------------------------------------------------------------
 -- MUTATION ENGINE
