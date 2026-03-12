@@ -1156,5 +1156,8 @@ function init()
 end
 
 function cleanup()
+  playing = false
+  engine.note_off()
   if my_lattice then my_lattice:destroy() end
+  clock.cancel_all()
 end
