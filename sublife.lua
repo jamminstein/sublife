@@ -17,7 +17,7 @@
 --   row 7: accent pattern
 --   row 8: controls
 --
--- v1.0
+-- v1.1 - added tension arc and call-and-response
 
 engine.name = "Sublife"
 
@@ -67,6 +67,7 @@ local ARC_SHAPES = { "sine", "triangle", "ramp_up", "ramp_down", "drift" }
 -- STATE
 ----------------------------------------------------------------
 local g = grid.connect()
+local m = nil
 local my_lattice
 local seq_sprocket
 local metro_redraw
@@ -87,7 +88,7 @@ local live_patterns = {}   -- what actually plays (after mutations)
 local pocket_lock = 65     -- 0=wild, 100=locked to home
 local mutation_rate = 25   -- base probability of mutation per step per phrase cycle
 
--- arc system (long-form macro sweeps)
+-- arc system (long-form macro parameter sweeps)
 local arc_phase = 0
 local arc_speed = 4        -- how many bars per full arc cycle
 local arc_shape = 1        -- index into ARC_SHAPES
@@ -108,6 +109,16 @@ local fill_data = {}
 
 -- groove / swing
 local swing_amount = 0      -- 0=straight, 100=full triplet swing
+
+-- TENSION ARC SYSTEM
+local tension = 0.0         -- 0.0-1.0, builds over time
+local tension_speed = 0.02  -- how fast tension builds per bar
+local tension_mode = true   -- auto-reset vs manual control
+
+-- CALL-AND-RESPONSE SYSTEM
+local call_buffer = {}      -- stores incoming MIDI notes
+local call_active = false
+local response_pending = false
 
 -- screen
 local screen_dirty = true
@@ -146,16 +157,14 @@ local param_pages = {
 local key3_time = 0
 
 -- markov chain for note transitions (scale degree transitions)
--- rows = current degree, cols = probability of next degree
--- biased toward root, fifth, and nearby motion
 local markov = {
-  { 30, 10, 15, 5, 20, 10, 10 }, -- from degree 1
-  { 25, 10, 20, 10, 10, 15, 10 }, -- from degree 2
-  { 20, 15, 10, 20, 10, 10, 15 }, -- from degree 3
-  { 15, 10, 20, 10, 20, 15, 10 }, -- from degree 4
-  { 25, 10, 10, 15, 10, 15, 15 }, -- from degree 5
-  { 20, 15, 10, 10, 20, 10, 15 }, -- from degree 6
-  { 30, 10, 15, 10, 15, 10, 10 }, -- from degree 7
+  { 30, 10, 15, 5, 20, 10, 10 },
+  { 25, 10, 20, 10, 10, 15, 10 },
+  { 20, 15, 10, 20, 10, 10, 15 },
+  { 15, 10, 20, 10, 20, 15, 10 },
+  { 25, 10, 10, 15, 10, 15, 15 },
+  { 20, 15, 10, 10, 20, 10, 15 },
+  { 30, 10, 15, 10, 15, 10, 10 },
 }
 
 ----------------------------------------------------------------
@@ -191,7 +200,6 @@ local function find_scale_index(note, scale)
   for i, n in ipairs(scale) do
     if n == note then return i end
   end
-  -- find nearest
   local best_i, best_d = 1, 999
   for i, n in ipairs(scale) do
     local d = math.abs(n - note)
@@ -203,6 +211,80 @@ end
 local function snap_to_scale(note)
   if #scale_notes == 0 then return note end
   return musicutil.snap_note_to_array(note, scale_notes)
+end
+
+----------------------------------------------------------------
+-- TENSION SYSTEM
+----------------------------------------------------------------
+
+local function update_tension()
+  if tension_mode then
+    -- Auto-increment tension
+    tension = tension + tension_speed
+    if tension >= 1.0 then
+      -- Auto-reset at peak (simulates "drop")
+      tension = 0.0
+    end
+  end
+end
+
+local function get_tension_density()
+  -- Higher tension = more notes
+  return 0.3 + tension * 0.6
+end
+
+local function get_tension_octave_range()
+  -- Higher tension = wider range
+  return math.floor(2 + tension * 4)
+end
+
+----------------------------------------------------------------
+-- CALL-AND-RESPONSE SYSTEM
+----------------------------------------------------------------
+
+local function init_midi()
+  m = midi.connect(1)
+  if m then
+    m.event = function(data)
+      local msg = midi.to_msg(data)
+      if msg.type == "note_on" and msg.vel > 0 then
+        table.insert(call_buffer, msg.note)
+        call_active = true
+      elseif msg.type == "note_off" or (msg.type == "note_on" and msg.vel == 0) then
+        -- Mark response as pending for next pattern cycle
+        if #call_buffer > 0 then
+          response_pending = true
+        end
+      end
+    end
+  end
+end
+
+local function generate_response()
+  if #call_buffer == 0 then return end
+  
+  -- Generate complementary notes based on call notes
+  for i = 1, pattern_length do
+    local live = live_patterns[current_bank][i]
+    if math.random() < 0.4 then
+      -- Pick a note relative to a call note
+      local call_note = call_buffer[((i - 1) % #call_buffer) + 1]
+      local scale_idx = find_scale_index(call_note, scale_notes)
+      if scale_idx then
+        -- Generate a response using scale intervals
+        local intervals = {0, 3, 5, 7, -2, -5}  -- complementary intervals
+        local interval_idx = ((i - 1) % #intervals) + 1
+        local response_idx = clamp(scale_idx + intervals[interval_idx], 1, #scale_notes)
+        live.note = scale_notes[response_idx]
+        live.vel = 80 + math.random(0, 30)
+        live.artic = ARTIC.PLUCK
+        live.prob = 100
+      end
+    end
+  end
+  
+  call_buffer = {}
+  response_pending = false
 end
 
 ----------------------------------------------------------------
@@ -219,13 +301,13 @@ end
 
 local function empty_step()
   return {
-    note   = 0,       -- 0 = rest, else MIDI note
-    vel    = 100,      -- 0-127
-    dur    = 0.5,      -- gate length as fraction of step
+    note   = 0,
+    vel    = 100,
+    dur    = 0.5,
     artic  = ARTIC.PLUCK,
-    prob   = 100,      -- 0-100
+    prob   = 100,
     accent = false,
-    micro  = 0,        -- micro timing offset in ms
+    micro  = 0,
   }
 end
 
@@ -241,7 +323,6 @@ local function init_patterns()
   seed_groove(1)
 end
 
--- Seed bank 1 with a funky LCD/Flea-inspired groove
 function seed_groove(bank)
   local r = root_note
   local p5 = root_note + 7
@@ -249,29 +330,23 @@ function seed_groove(bank)
   local sub = root_note - 12
   local p = home_patterns[bank]
 
-  -- A 16-step groove: 16th note grid
-  -- Beat 1: strong root
   p[1]  = { note=r,   vel=120, dur=0.8, artic=ARTIC.PLUCK, prob=100, accent=true,  micro=0 }
   p[2]  = { note=0,   vel=0,   dur=0,   artic=ARTIC.REST,  prob=100, accent=false, micro=0 }
   p[3]  = { note=r,   vel=40,  dur=0.3, artic=ARTIC.GHOST, prob=70,  accent=false, micro=0 }
   p[4]  = { note=0,   vel=0,   dur=0,   artic=ARTIC.REST,  prob=100, accent=false, micro=0 }
-  -- Beat 2: fifth with slap
   p[5]  = { note=p5,  vel=110, dur=0.5, artic=ARTIC.SLAP,  prob=100, accent=false, micro=0 }
   p[6]  = { note=r,   vel=35,  dur=0.2, artic=ARTIC.GHOST, prob=55,  accent=false, micro=0 }
   p[7]  = { note=0,   vel=0,   dur=0,   artic=ARTIC.REST,  prob=100, accent=false, micro=0 }
   p[8]  = { note=m3,  vel=60,  dur=0.3, artic=ARTIC.MUTE,  prob=80,  accent=false, micro=0 }
-  -- Beat 3: root return, accent
   p[9]  = { note=r,   vel=115, dur=0.7, artic=ARTIC.PLUCK, prob=100, accent=true,  micro=0 }
   p[10] = { note=0,   vel=0,   dur=0,   artic=ARTIC.REST,  prob=100, accent=false, micro=0 }
   p[11] = { note=r,   vel=45,  dur=0.25,artic=ARTIC.GHOST, prob=65,  accent=false, micro=0 }
   p[12] = { note=r+5, vel=70,  dur=0.4, artic=ARTIC.SLIDE, prob=75,  accent=false, micro=0 }
-  -- Beat 4: tension, leading back
   p[13] = { note=p5,  vel=105, dur=0.5, artic=ARTIC.PLUCK, prob=95,  accent=false, micro=0 }
   p[14] = { note=r,   vel=30,  dur=0.2, artic=ARTIC.GHOST, prob=50,  accent=false, micro=0 }
   p[15] = { note=sub, vel=95,  dur=0.5, artic=ARTIC.PLUCK, prob=85,  accent=false, micro=0 }
   p[16] = { note=r-1, vel=65,  dur=0.3, artic=ARTIC.SLIDE, prob=70,  accent=false, micro=0 }
 
-  -- copy to live
   for s = 1, NUM_STEPS do
     live_patterns[bank][s] = deep_copy(home_patterns[bank][s])
   end
@@ -279,7 +354,6 @@ end
 
 ----------------------------------------------------------------
 -- MUTATION ENGINE
--- The heart of sublife: musically intelligent variation
 ----------------------------------------------------------------
 
 local mutation_types = {
@@ -298,7 +372,6 @@ local mutation_types = {
     name = "octave_jump",
     weight = 8,
     fn = function(step_data)
-      -- Daft Punk style: sudden octave displacement
       if step_data.note == 0 then return end
       local dir = math.random() > 0.6 and 12 or -12
       local new_note = step_data.note + dir
@@ -311,9 +384,7 @@ local mutation_types = {
     name = "ghost_inject",
     weight = 25,
     fn = function(step_data)
-      -- Turn a rest into a ghost note, or make a note ghostly
       if step_data.note == 0 then
-        -- inject a ghost note where there was silence
         local idx = math.random(1, math.min(7, #scale_notes))
         step_data.note = scale_notes[idx]
         step_data.vel = math.random(20, 45)
@@ -339,7 +410,6 @@ local mutation_types = {
     name = "rest_carve",
     weight = 12,
     fn = function(step_data)
-      -- Sometimes silence IS the variation
       step_data.note = 0
       step_data.artic = ARTIC.REST
       step_data.vel = 0
@@ -358,7 +428,6 @@ local mutation_types = {
     name = "chromatic_approach",
     weight = 12,
     fn = function(step_data)
-      -- Flea-style: chromatic leading tone
       if step_data.note == 0 then return end
       local dir = math.random() > 0.5 and -1 or 1
       step_data.note = step_data.note + dir
@@ -370,13 +439,10 @@ local mutation_types = {
     name = "markov_leap",
     weight = 10,
     fn = function(step_data)
-      -- Use the Markov chain to pick a new note based on current
       if step_data.note == 0 then return end
       local idx = find_scale_index(step_data.note, scale_notes)
-      -- map to scale degree (mod 7)
       local degree = ((idx - 1) % 7) + 1
       local next_degree = weighted_choice(markov[degree])
-      -- find the note at that degree in same octave region
       local octave = math.floor((idx - 1) / 7)
       local new_idx = clamp(octave * 7 + next_degree, 1, #scale_notes)
       step_data.note = scale_notes[new_idx]
@@ -405,14 +471,9 @@ local function mutate_step(step_idx)
   local home = home_patterns[current_bank][step_idx]
   local live = live_patterns[current_bank][step_idx]
 
-  -- Pocket lock determines mutation probability
-  -- At pocket_lock=100, almost no mutations
-  -- At pocket_lock=0, mutations happen freely
   local mutation_chance = (100 - pocket_lock) * mutation_rate / 100 / 100
 
   if math.random() > mutation_chance then
-    -- No mutation: drift back toward home (gravity)
-    -- Blend 20% back toward home values
     if home.note > 0 and live.note > 0 then
       if math.random() < 0.2 then
         live.note = home.note
@@ -425,7 +486,6 @@ local function mutate_step(step_idx)
     return
   end
 
-  -- Pick a mutation type (weighted)
   local weights = {}
   for _, m in ipairs(mutation_types) do
     table.insert(weights, m.weight)
@@ -434,7 +494,6 @@ local function mutate_step(step_idx)
   mutation_types[choice].fn(live)
 end
 
--- Mutate the entire live pattern (called at phrase boundaries)
 local function mutate_pattern()
   for s = 1, pattern_length do
     mutate_step(s)
@@ -442,13 +501,10 @@ local function mutate_pattern()
   screen_dirty = true
 end
 
--- Forcefully mutate (KEY3 tap)
 local function force_mutate()
-  -- More aggressive mutation: hit every step with higher probability
   local saved_lock = pocket_lock
   pocket_lock = math.max(0, pocket_lock - 40)
   for s = 1, pattern_length do
-    -- Double chance
     mutate_step(s)
     mutate_step(s)
   end
@@ -456,7 +512,6 @@ local function force_mutate()
   screen_dirty = true
 end
 
--- Reset live to home
 local function reset_to_home()
   for s = 1, NUM_STEPS do
     live_patterns[current_bank][s] = deep_copy(home_patterns[current_bank][s])
@@ -464,7 +519,6 @@ local function reset_to_home()
   screen_dirty = true
 end
 
--- Capture live as new home
 local function capture_to_home()
   for s = 1, NUM_STEPS do
     home_patterns[current_bank][s] = deep_copy(live_patterns[current_bank][s])
@@ -473,7 +527,7 @@ local function capture_to_home()
 end
 
 ----------------------------------------------------------------
--- ARC SYSTEM (long-form macro parameter sweeps)
+-- ARC SYSTEM
 ----------------------------------------------------------------
 
 local function arc_value()
@@ -489,7 +543,6 @@ local function arc_value()
   elseif shape == "ramp_down" then
     return 1 - p
   elseif shape == "drift" then
-    -- random walk, slowly wandering
     arc_drift_val = clamp(
       arc_drift_val + (math.random() - 0.5) * 0.08,
       0, 1
@@ -504,10 +557,9 @@ local function advance_arc()
   local increment = 1 / (arc_speed * pattern_length)
   arc_phase = (arc_phase + increment) % 1.0
 
-  -- Apply arc to filter cutoff
   local av = arc_value()
   local cutoff = arc_cutoff_min + (arc_cutoff_max - arc_cutoff_min) * av * arc_depth
-  cutoff = cutoff + arc_cutoff_min * (1 - arc_depth) -- base cutoff when depth < 1
+  cutoff = cutoff + arc_cutoff_min * (1 - arc_depth)
   engine.cutoff(cutoff)
 end
 
@@ -518,10 +570,9 @@ end
 local function generate_fill()
   fill_data = {}
   local fill_type = math.random(1, 5)
-  local fill_len = math.random(2, 6) -- steps
+  local fill_len = math.random(2, 6)
 
   if fill_type == 1 then
-    -- Chromatic run (Flea style)
     local start_note = scale_notes[math.random(1, math.min(5, #scale_notes))]
     for i = 1, fill_len do
       fill_data[i] = {
@@ -532,7 +583,6 @@ local function generate_fill()
       }
     end
   elseif fill_type == 2 then
-    -- Octave bounce (Daft Punk style)
     local base = root_note
     for i = 1, fill_len do
       fill_data[i] = {
@@ -543,7 +593,6 @@ local function generate_fill()
       }
     end
   elseif fill_type == 3 then
-    -- Slap burst (Flea)
     for i = 1, fill_len do
       local idx = math.random(1, math.min(7, #scale_notes))
       fill_data[i] = {
@@ -554,7 +603,6 @@ local function generate_fill()
       }
     end
   elseif fill_type == 4 then
-    -- Silence (the most powerful fill)
     for i = 1, fill_len do
       fill_data[i] = {
         note = 0,
@@ -564,7 +612,6 @@ local function generate_fill()
       }
     end
   elseif fill_type == 5 then
-    -- Root pedal 16ths (LCD Soundsystem motorik build)
     for i = 1, fill_len do
       fill_data[i] = {
         note = root_note,
@@ -586,7 +633,6 @@ end
 local function note_on(step_data)
   if step_data.note == 0 or step_data.artic == ARTIC.REST then return end
 
-  -- probability gate
   if math.random(100) > step_data.prob then return end
 
   local freq = musicutil.note_num_to_freq(step_data.note)
@@ -597,8 +643,7 @@ local function note_on(step_data)
 
   engine.note_on(freq, vel, cutoff, artic, slide)
 
-  -- schedule note off based on duration
-  local step_dur = clock.get_beat_sec() / 4 -- 16th note duration
+  local step_dur = clock.get_beat_sec() / 4
   clock.run(function()
     clock.sleep(step_dur * step_data.dur)
     engine.note_off()
@@ -610,24 +655,26 @@ local function step_advance()
 
   current_step = (current_step % pattern_length) + 1
 
-  -- Track bars and phrases
   if current_step == 1 then
     bar_count = bar_count + 1
     bar_in_phrase = (bar_in_phrase % phrase_length) + 1
 
-    -- Phrase boundary: mutate + maybe fill
     if bar_in_phrase == 1 and bar_count > 1 then
       mutate_pattern()
+      update_tension()
       if math.random(100) <= fill_probability then
         generate_fill()
       end
     end
+    
+    -- Check for pending call-and-response
+    if response_pending then
+      generate_response()
+    end
   end
 
-  -- Advance the arc
   advance_arc()
 
-  -- Determine what to play
   local step_data
 
   if fill_active and fill_steps_remaining > 0 then
@@ -641,7 +688,6 @@ local function step_advance()
     step_data = live_patterns[current_bank][current_step]
   end
 
-  -- Apply swing
   if swing_amount > 0 and current_step % 2 == 0 then
     local swing_delay = (swing_amount / 100) * (clock.get_beat_sec() / 8)
     clock.run(function()
@@ -754,25 +800,20 @@ local function grid_redraw()
 
   local pat = live_patterns[current_bank]
 
-  -- Rows 1-6: Piano roll
   for col = 1, pattern_length do
     local sd = pat[col]
     for row = 1, GRID_PITCH_ROWS do
-      -- row 1 = highest pitch, row 6 = lowest
-      local pitch_idx = GRID_PITCH_ROWS - row + 1 -- 6,5,4,3,2,1
+      local pitch_idx = GRID_PITCH_ROWS - row + 1
       local target_note = scale_notes[pitch_idx] or (root_note + (pitch_idx - 1) * 2)
 
       local brightness = BRIGHT.OFF
 
-      -- dim grid for reference
       if col <= pattern_length then
         brightness = BRIGHT.GHOST
       end
 
-      -- show note
       if sd.note > 0 and sd.artic ~= ARTIC.REST then
         local note_pitch_idx = find_scale_index(sd.note, scale_notes)
-        -- map to grid row range
         local note_row = GRID_PITCH_ROWS - clamp(note_pitch_idx, 1, GRID_PITCH_ROWS) + 1
         if row == note_row then
           if sd.artic == ARTIC.GHOST then
@@ -785,7 +826,6 @@ local function grid_redraw()
         end
       end
 
-      -- playhead
       if col == current_step and playing then
         if brightness > BRIGHT.GHOST then
           brightness = BRIGHT.FULL
@@ -798,7 +838,6 @@ local function grid_redraw()
     end
   end
 
-  -- Row 7: Accent pattern
   for col = 1, pattern_length do
     local sd = pat[col]
     local brightness = BRIGHT.OFF
@@ -813,39 +852,31 @@ local function grid_redraw()
     g:led(col, GRID_ACCENT_ROW, brightness)
   end
 
-  -- Row 8: Controls
-  -- Col 1-4: bank select
   for i = 1, NUM_BANKS do
     g:led(i, GRID_CTRL_ROW, i == current_bank and BRIGHT.FULL or BRIGHT.DIM)
   end
-  -- Col 6: mutate
   g:led(6, GRID_CTRL_ROW, BRIGHT.MID)
-  -- Col 7: reset
   g:led(7, GRID_CTRL_ROW, BRIGHT.MID)
-  -- Col 8: capture
   g:led(8, GRID_CTRL_ROW, BRIGHT.MID)
-  -- Col 10-13: variation amount (4-step fader)
-  local var_level = math.floor((100 - pocket_lock) / 25) + 1 -- 1-5
+  
+  local var_level = math.floor((100 - pocket_lock) / 25) + 1
   for i = 10, 13 do
     local lvl = i - 9
     g:led(i, GRID_CTRL_ROW, lvl <= var_level and BRIGHT.BRIGHT or BRIGHT.GHOST)
   end
-  -- Col 15: fill trigger
   g:led(15, GRID_CTRL_ROW, fill_active and BRIGHT.FULL or BRIGHT.DIM)
-  -- Col 16: play/stop
   g:led(16, GRID_CTRL_ROW, playing and BRIGHT.FULL or BRIGHT.MID)
 
   g:refresh()
 end
 
 g.key = function(x, y, z)
-  if z == 0 then return end -- only act on press
+  if z == 0 then return end
 
   local pat = live_patterns[current_bank]
   local home = home_patterns[current_bank]
 
   if y >= 1 and y <= GRID_PITCH_ROWS then
-    -- Piano roll: toggle note at this pitch
     local pitch_idx = GRID_PITCH_ROWS - y + 1
     local target_note = scale_notes[pitch_idx] or (root_note + (pitch_idx - 1) * 2)
 
@@ -853,17 +884,14 @@ g.key = function(x, y, z)
       local sd = pat[x]
       local hd = home[x]
       if sd.note == target_note then
-        -- toggle off
         sd.note = 0; sd.artic = ARTIC.REST; sd.vel = 0
         hd.note = 0; hd.artic = ARTIC.REST; hd.vel = 0
       else
-        -- set note
         sd.note = target_note
         sd.vel = 100
         sd.dur = 0.5
         sd.artic = ARTIC.PLUCK
         sd.prob = 100
-        -- also set home
         hd.note = target_note
         hd.vel = 100
         hd.dur = 0.5
@@ -872,7 +900,6 @@ g.key = function(x, y, z)
       end
     end
   elseif y == GRID_ACCENT_ROW then
-    -- Toggle accent
     if x >= 1 and x <= pattern_length then
       pat[x].accent = not pat[x].accent
       home[x].accent = pat[x].accent
@@ -886,27 +913,20 @@ g.key = function(x, y, z)
     end
   elseif y == GRID_CTRL_ROW then
     if x >= 1 and x <= NUM_BANKS then
-      -- Bank select
       current_bank = x
     elseif x == 6 then
-      -- Mutate
       force_mutate()
     elseif x == 7 then
-      -- Reset
       reset_to_home()
     elseif x == 8 then
-      -- Capture
       capture_to_home()
     elseif x >= 10 and x <= 13 then
-      -- Variation amount fader
-      local level = x - 9 -- 1-4
+      local level = x - 9
       pocket_lock = 100 - (level * 25)
       params:set("pocket_lock", pocket_lock)
     elseif x == 15 then
-      -- Trigger fill now
       generate_fill()
     elseif x == 16 then
-      -- Play/stop
       if playing then
         playing = false
         engine.note_off()
@@ -930,19 +950,17 @@ end
 ----------------------------------------------------------------
 
 local function draw_pattern_viz()
-  -- Draw the live pattern as a mini piano roll
   local pat = live_patterns[current_bank]
   local x_start = 2
-  local x_width = 7 -- pixels per step
+  local x_width = 7
   local y_top = 2
   local y_bottom = 38
-  local pitch_range = 36 -- semitones visible
+  local pitch_range = 36
 
   for s = 1, pattern_length do
     local sd = pat[s]
     local x = x_start + (s - 1) * x_width
 
-    -- Playhead column
     if s == current_step and playing then
       screen.level(2)
       screen.rect(x, y_top, x_width - 1, y_bottom - y_top)
@@ -950,22 +968,18 @@ local function draw_pattern_viz()
     end
 
     if sd.note > 0 and sd.artic ~= ARTIC.REST then
-      -- Map note to y position
       local note_offset = sd.note - (root_note - 12)
       local y = y_bottom - (note_offset / pitch_range) * (y_bottom - y_top)
       y = clamp(y, y_top, y_bottom - 2)
 
-      -- Brightness based on velocity and articulation
       local level = math.floor(sd.vel / 127 * 12) + 3
       if sd.artic == ARTIC.GHOST then level = math.floor(level * 0.4) end
       if sd.accent then level = 15 end
       if s == current_step and playing then level = 15 end
       screen.level(clamp(level, 1, 15))
 
-      -- Draw note dot
       local dot_size = sd.artic == ARTIC.SLAP and 3 or 2
       if sd.artic == ARTIC.MUTE then
-        -- muted notes: hollow
         screen.rect(x + 1, y, dot_size, dot_size)
         screen.stroke()
       else
@@ -973,7 +987,6 @@ local function draw_pattern_viz()
         screen.fill()
       end
 
-      -- Slide indicator: small line down
       if sd.artic == ARTIC.SLIDE then
         screen.move(x + 2, y + 2)
         screen.line(x + 2, y + 5)
@@ -982,7 +995,6 @@ local function draw_pattern_viz()
     end
   end
 
-  -- Arc visualization: thin bar at bottom of viz area
   screen.level(4)
   local arc_x = x_start + arc_phase * (pattern_length * x_width - 2)
   screen.rect(arc_x, y_bottom + 1, 2, 2)
@@ -994,25 +1006,21 @@ local function draw_params()
   local pg = param_pages[page]
   if not pg then return end
 
-  -- Page indicator
   screen.level(4)
   screen.move(2, y_start)
   local page_names = { "GROOVE", "SOUND", "ARCS" }
   screen.text(page_names[page])
 
-  -- Show 2 params (selected and next)
   for i = 0, 1 do
     local idx = selected_param + i
     if idx > #pg then break end
     local p = pg[idx]
     local y = y_start + 8 + (i * 10)
 
-    -- Name
     screen.level(i == 0 and 15 or 4)
     screen.move(2, y)
     screen.text(p.name)
 
-    -- Value
     screen.move(126, y)
     screen.text_right(string.format("%.0f", params:get(p.key) or 0))
   end
@@ -1021,7 +1029,6 @@ end
 function redraw()
   screen.clear()
 
-  -- Status bar
   screen.level(playing and 15 or 4)
   screen.move(2, 62)
   screen.text(playing and "▶" or "■")
@@ -1041,12 +1048,15 @@ function redraw()
 
   screen.level(6)
   screen.move(86, 62)
-  screen.text("PL:" .. pocket_lock)
+  screen.text("T:" .. math.floor(tension * 100))
 
-  -- Pattern visualization
+  if call_active then
+    screen.level(12)
+    screen.move(110, 62)
+    screen.text("CALL")
+  end
+
   draw_pattern_viz()
-
-  -- Parameters
   draw_params()
 
   screen.update()
@@ -1058,18 +1068,19 @@ end
 
 function enc(n, d)
   if n == 1 then
-    -- ENC1: pocket lock
-    pocket_lock = clamp(pocket_lock + d, 0, 100)
-    params:set("pocket_lock", pocket_lock)
+    if not tension_mode then
+      -- Manual tension control when alt held
+      tension = clamp(tension + d * 0.02, 0.0, 1.0)
+    else
+      pocket_lock = clamp(pocket_lock + d, 0, 100)
+      params:set("pocket_lock", pocket_lock)
+    end
   elseif n == 2 then
-    -- ENC2: navigate params / pages
-    -- hold KEY1 to change pages (not implemented for simplicity, use long press)
     local pg = param_pages[page]
     if pg then
       selected_param = clamp(selected_param + d, 1, #pg)
     end
   elseif n == 3 then
-    -- ENC3: adjust selected param
     local pg = param_pages[page]
     if pg and pg[selected_param] then
       params:delta(pg[selected_param].key, d)
@@ -1081,7 +1092,6 @@ end
 function key(n, z)
   if n == 2 then
     if z == 1 then
-      -- Play/Stop
       if playing then
         playing = false
         engine.note_off()
@@ -1098,17 +1108,13 @@ function key(n, z)
     if z == 1 then
       key3_time = util.time()
     else
-      -- Release
       local held = util.time() - key3_time
       if held > 1.0 then
-        -- Long hold: reset to home
         reset_to_home()
       elseif held > 0.5 then
-        -- Medium hold: change page
         page = (page % #param_pages) + 1
         selected_param = 1
       else
-        -- Short tap: mutate
         force_mutate()
       end
     end
@@ -1143,11 +1149,11 @@ function init()
   init_patterns()
   init_params()
   init_lattice()
+  init_midi()
   my_lattice:start()
   clock.run(screen_refresh)
 
-  -- Grid connect callback
-  g.key = g.key -- already set above
+  g.key = g.key
   grid_redraw()
   redraw()
 end
