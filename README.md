@@ -1,41 +1,27 @@
 # sublife
 
-A living bass sequencer inspired by LCD Soundsystem, Flea, and Daft Punk. Features piano roll sequencing, accent patterns, multiple articulations (pluck, slap, mute, slide, ghost notes), pattern banks, and evolution through mutation.
-
-## Install
-
-`;install https://github.com/jamminstein/sublife`
+> Living bass sequencer inspired by LCD Soundsystem and Daft Punk
 
 ## Controls
 
-**Norns:**
-- E1: Pocket lock (cycle sync modes)
-- E2: Scroll through parameters
-- E3: Adjust selected parameter
-- K2: Play / Stop
-- K3 (tap): Mutate patterns / (hold): Reset
+- **E1** — pocket lock (variation)
+- **E2** — scroll parameters
+- **E3** — adjust value
+- **K2** — play / stop
+- **K3** — tap=mutate, hold=reset
 
-**Grid (16x8):**
-- Rows 1-6: Piano roll (note sequencing)
-- Row 7: Accent pattern
-- Row 8: Transport and control buttons
+## Grid
 
-## Features
-
-- Piano roll sequencer with 6 note rows
-- Multiple articulation modes: pluck, slap, mute, slide, ghost notes
-- Accent pattern control
-- 4 pattern banks for organization
-- Mutation system for evolving patterns
-- Arc-compatible for analog control
-- Pocket lock modes for tempo synchronization
+16×8 monome grid with piano roll sequencer. Rows 1-6 show pitch, row 7 is accent pattern, row 8 contains controls for banks, mutation, reset, and capture.
 
 ## Requirements
 
 - norns
-- 16x8 grid
-- Engine_Sublife engine (included)
+- grid (16×8 monome)
+- engine: Sublife
 
-## Author
+## Install
 
-@jamminstein
+```
+;install https://github.com/jamminstein/sublife
+```
