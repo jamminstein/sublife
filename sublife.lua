@@ -17,7 +17,7 @@
 --   row 7: accent pattern
 --   row 8: controls
 --
--- v1.1 - added tension arc and call-and-response
+-- v1.2 - redesigned screen with zone system, melodic contour, tension arc
 
 engine.name = "Sublife"
 
@@ -114,16 +114,22 @@ local swing_amount = 0      -- 0=straight, 100=full triplet swing
 local tension = 0.0         -- 0.0-1.0, builds over time
 local tension_speed = 0.02  -- how fast tension builds per bar
 local tension_mode = true   -- auto-reset vs manual control
+local drop_flash = 0        -- time remaining for drop flash (0 = no flash)
+local drop_flash_duration = 0.2
 
 -- CALL-AND-RESPONSE SYSTEM
 local call_buffer = {}      -- stores incoming MIDI notes
 local call_active = false
 local response_pending = false
 
--- screen
+-- screen state
 local screen_dirty = true
 local selected_param = 1
 local page = 1 -- 1=main, 2=sound, 3=arcs
+local beat_phase = 0        -- 0-1 for beat pulse animation
+local popup_param = nil     -- currently showing parameter popup
+local popup_val = nil
+local popup_time = 0        -- countdown to hide popup
 
 local param_pages = {
   { -- page 1: groove
@@ -224,6 +230,7 @@ local function update_tension()
     if tension >= 1.0 then
       -- Auto-reset at peak (simulates "drop")
       tension = 0.0
+      drop_flash = drop_flash_duration
     end
   end
 end
@@ -946,119 +953,188 @@ g.key = function(x, y, z)
 end
 
 ----------------------------------------------------------------
--- SCREEN
+-- SCREEN - NEW ZONE-BASED DESIGN
 ----------------------------------------------------------------
 
-local function draw_pattern_viz()
-  local pat = live_patterns[current_bank]
-  local x_start = 2
-  local x_width = 7
-  local y_top = 2
-  local y_bottom = 38
-  local pitch_range = 36
+local function draw_status_strip()
+  -- ZONE 1: y 0-8
+  -- Left: "SUBLIFE" title at level 4
+  screen.level(4)
+  screen.move(2, 6)
+  screen.text("SUBLIFE")
 
+  -- Center: Current mutation mode at level 6
+  local mode_name = "LIVE"
+  if fill_active then mode_name = "FILL" end
+  screen.level(6)
+  screen.move(64, 6)
+  screen.text_center(mode_name)
+
+  -- Right: Beat pulse dot at x=124 (flashes on beat)
+  local pulse_level = 6 + math.floor(beat_phase * 9)
+  screen.level(pulse_level)
+  screen.rect(124, 4, 2, 2)
+  screen.fill()
+end
+
+local function draw_live_zone()
+  -- ZONE 2: y 9-52
+  -- Draw 16-step bass sequence as melodic contour
+  local pat = live_patterns[current_bank]
+  
+  local x_start = 2
+  local x_step = 8
+  local y_top = 10
+  local y_bottom = 48
+  local pitch_range = 36
+  
+  -- Points for contour line
+  local points = {}
+  
   for s = 1, pattern_length do
     local sd = pat[s]
-    local x = x_start + (s - 1) * x_width
-
-    if s == current_step and playing then
-      screen.level(2)
-      screen.rect(x, y_top, x_width - 1, y_bottom - y_top)
-      screen.fill()
-    end
-
+    local x = x_start + (s - 1) * x_step
+    
     if sd.note > 0 and sd.artic ~= ARTIC.REST then
       local note_offset = sd.note - (root_note - 12)
       local y = y_bottom - (note_offset / pitch_range) * (y_bottom - y_top)
       y = clamp(y, y_top, y_bottom - 2)
-
-      local level = math.floor(sd.vel / 127 * 12) + 3
-      if sd.artic == ARTIC.GHOST then level = math.floor(level * 0.4) end
-      if sd.accent then level = 15 end
-      if s == current_step and playing then level = 15 end
-      screen.level(clamp(level, 1, 15))
-
-      local dot_size = sd.artic == ARTIC.SLAP and 3 or 2
-      if sd.artic == ARTIC.MUTE then
-        screen.rect(x + 1, y, dot_size, dot_size)
-        screen.stroke()
-      else
-        screen.rect(x + 1, y, dot_size, dot_size)
+      
+      table.insert(points, {x = x, y = y, step = s, data = sd})
+    end
+  end
+  
+  -- Draw contour line with antialiasing
+  if #points > 1 then
+    screen.level(8)
+    screen.aa(1)
+    for i = 1, #points - 1 do
+      screen.move(points[i].x, points[i].y)
+      screen.line(points[i + 1].x, points[i + 1].y)
+    end
+    screen.stroke()
+    screen.aa(0)
+  end
+  
+  -- Draw note dots (playhead and active steps)
+  for _, p in ipairs(points) do
+    local level = 12  -- default active step
+    local size = 2
+    
+    if p.step == current_step and playing then
+      level = 15  -- playhead is brightest
+    end
+    
+    if p.data.artic == ARTIC.GHOST then
+      level = 6   -- ghost notes are dim
+      size = 1
+    elseif p.data.accent then
+      level = 15  -- accents are bright
+      size = 3
+    end
+    
+    screen.level(level)
+    screen.rect(p.x - size/2, p.y - size/2, size, size)
+    screen.fill()
+  end
+  
+  -- TENSION ARC: thin horizontal bar at y ~48-50
+  local tension_bar_y = 48
+  local tension_bar_h = 2
+  
+  local tension_level = 6 + math.floor(tension * 6)  -- 6-12 normally
+  if drop_flash > 0 then
+    tension_level = 15  -- flash bright on drop
+    drop_flash = drop_flash - (1/12)  -- decrement by frame
+  end
+  
+  screen.level(tension_level)
+  local tension_width = math.floor(pattern_length * x_step * tension)
+  screen.rect(x_start, tension_bar_y, tension_width, tension_bar_h)
+  screen.fill()
+  
+  -- MUTATION PREVIEW: show dim alternate note for next mutation
+  if pocket_lock < 80 then  -- only show when locked enough to be interesting
+    local preview_step = ((current_step % pattern_length) + 1)
+    if preview_step <= pattern_length then
+      local sd = pat[preview_step]
+      if sd.note > 0 and sd.artic ~= ARTIC.REST then
+        local note_offset = sd.note - (root_note - 12)
+        local y = y_bottom - (note_offset / pitch_range) * (y_bottom - y_top)
+        y = clamp(y, y_top, y_bottom - 2)
+        
+        -- show predicted alternative 2 semitones up
+        local alt_offset = note_offset + 2
+        local alt_y = y_bottom - (alt_offset / pitch_range) * (y_bottom - y_top)
+        alt_y = clamp(alt_y, y_top, y_bottom - 2)
+        
+        local x = x_start + (preview_step - 1) * x_step
+        screen.level(3)  -- very dim preview
+        screen.rect(x - 1, alt_y - 1, 2, 2)
         screen.fill()
-      end
-
-      if sd.artic == ARTIC.SLIDE then
-        screen.move(x + 2, y + 2)
-        screen.line(x + 2, y + 5)
-        screen.stroke()
       end
     end
   end
-
-  screen.level(4)
-  local arc_x = x_start + arc_phase * (pattern_length * x_width - 2)
-  screen.rect(arc_x, y_bottom + 1, 2, 2)
-  screen.fill()
 end
 
-local function draw_params()
-  local y_start = 44
-  local pg = param_pages[page]
-  if not pg then return end
-
-  screen.level(4)
-  screen.move(2, y_start)
-  local page_names = { "GROOVE", "SOUND", "ARCS" }
-  screen.text(page_names[page])
-
-  for i = 0, 1 do
-    local idx = selected_param + i
-    if idx > #pg then break end
-    local p = pg[idx]
-    local y = y_start + 8 + (i * 10)
-
-    screen.level(i == 0 and 15 or 4)
-    screen.move(2, y)
-    screen.text(p.name)
-
+local function draw_context_bar()
+  -- ZONE 3: y 53-58
+  local y = 54
+  
+  -- Root + Scale at level 8
+  screen.level(8)
+  screen.move(2, y)
+  local note_name = musicutil.note_num_to_name(root_note)
+  screen.text(note_name .. " " .. SCALE_NAMES[scale_type]:sub(1, 3))
+  
+  -- BPM at level 6
+  screen.level(6)
+  screen.move(50, y)
+  screen.text("BPM: " .. math.floor(params:get("arc_speed")))
+  
+  -- Mutation rate at level 5
+  screen.level(5)
+  screen.move(86, y)
+  screen.text("MUT: " .. math.floor(mutation_rate))
+  
+  -- "DROP IN X" countdown at level 6 if tension building
+  if tension > 0.5 then
+    screen.level(6)
+    local bars_until_drop = math.ceil((1.0 - tension) / tension_speed)
     screen.move(126, y)
-    screen.text_right(string.format("%.0f", params:get(p.key) or 0))
+    screen.text_right("DROP:" .. bars_until_drop)
+  end
+end
+
+local function draw_popup()
+  -- TRANSIENT PARAMETER POPUP: enc() triggers popup for 0.8s
+  if popup_param and popup_time > 0 then
+    popup_time = popup_time - (1/12)
+    
+    screen.level(15)
+    screen.rect(32, 24, 64, 16)
+    screen.fill()
+    
+    screen.level(0)
+    screen.move(64, 28)
+    screen.text_center(popup_param)
+    
+    screen.move(64, 38)
+    screen.text_center(tostring(popup_val))
   end
 end
 
 function redraw()
   screen.clear()
-
-  screen.level(playing and 15 or 4)
-  screen.move(2, 62)
-  screen.text(playing and "▶" or "■")
-
-  screen.level(8)
-  screen.move(12, 62)
-  screen.text("BK:" .. current_bank)
-
-  screen.move(38, 62)
-  screen.text("S:" .. current_step)
-
-  if fill_active then
-    screen.level(15)
-    screen.move(60, 62)
-    screen.text("FILL")
-  end
-
-  screen.level(6)
-  screen.move(86, 62)
-  screen.text("T:" .. math.floor(tension * 100))
-
-  if call_active then
-    screen.level(12)
-    screen.move(110, 62)
-    screen.text("CALL")
-  end
-
-  draw_pattern_viz()
-  draw_params()
-
+  
+  -- ~12fps refresh for tension animation and beat pulse
+  beat_phase = (beat_phase + 1/12) % 1.0
+  
+  draw_status_strip()
+  draw_live_zone()
+  draw_context_bar()
+  draw_popup()
+  
   screen.update()
 end
 
@@ -1074,6 +1150,9 @@ function enc(n, d)
     else
       pocket_lock = clamp(pocket_lock + d, 0, 100)
       params:set("pocket_lock", pocket_lock)
+      popup_param = "POCKET LOCK"
+      popup_val = pocket_lock
+      popup_time = 0.8
     end
   elseif n == 2 then
     local pg = param_pages[page]
@@ -1084,6 +1163,9 @@ function enc(n, d)
     local pg = param_pages[page]
     if pg and pg[selected_param] then
       params:delta(pg[selected_param].key, d)
+      popup_param = pg[selected_param].name:upper()
+      popup_val = params:get(pg[selected_param].key)
+      popup_time = 0.8
     end
   end
   screen_dirty = true
@@ -1128,7 +1210,7 @@ end
 
 local function screen_refresh()
   while true do
-    clock.sleep(1/15)
+    clock.sleep(1/12)  -- 12fps for smooth animation
     if screen_dirty then
       redraw()
       screen_dirty = false
