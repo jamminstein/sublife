@@ -97,6 +97,17 @@ local arc_cutoff_min = 150
 local arc_cutoff_max = 5000
 local arc_drift_val = 0.5  -- random walk state
 
+-- reference artist style system
+local style = "custom"     -- "lcd", "flea", "daft", "custom"
+local STYLE_PRESETS = {
+  lcd = {density=0.7, range=12, staccato=0.3},
+  flea = {density=0.85, range=24, staccato=0.1},
+  daft = {density=0.6, range=8, staccato=0.5}
+}
+
+-- drive/compression
+local drive = 0.0          -- 0.0-1.0, velocity boost for aggressive bass
+
 -- fill system
 local phrase_length = 4        -- bars per phrase
 local fill_probability = 35    -- % chance of fill at phrase boundary
@@ -161,6 +172,14 @@ local param_pages = {
 
 -- key hold tracking
 local key3_time = 0
+
+-- MIDI sync
+local clock_source = "internal"  -- "internal" or "midi"
+local midi_clock_count = 0
+local external_bpm = 120
+
+-- phrase boundary flash
+local phrase_flash = 0  -- time remaining for flash (0 = no flash)
 
 -- markov chain for note transitions (scale degree transitions)
 local markov = {
@@ -254,6 +273,31 @@ local function init_midi()
   if m then
     m.event = function(data)
       local msg = midi.to_msg(data)
+
+      -- MIDI clock sync
+      if msg.type == "clock" and clock_source == "midi" then
+        midi_clock_count = (midi_clock_count + 1) % 24  -- 24 clocks per quarter note
+        if midi_clock_count == 0 and playing then
+          -- trigger step advance on quarter note boundaries
+          step_advance()
+        end
+      elseif msg.type == "start" then
+        if clock_source == "midi" and not playing then
+          playing = true
+          current_step = 0
+          bar_count = 0
+          bar_in_phrase = 0
+          midi_clock_count = 0
+        end
+      elseif msg.type == "stop" then
+        if clock_source == "midi" then
+          playing = false
+          engine.note_off()
+          current_step = 0
+        end
+      end
+
+      -- Call-and-response system
       if msg.type == "note_on" and msg.vel > 0 then
         table.insert(call_buffer, msg.note)
         call_active = true
@@ -644,6 +688,13 @@ local function note_on(step_data)
 
   local freq = musicutil.note_num_to_freq(step_data.note)
   local vel = step_data.vel / 127
+
+  -- Apply drive/compression for velocity boost
+  if drive > 0 then
+    vel = vel * (1 + drive * 0.5)
+    vel = clamp(vel, 0, 1.0)  -- clamped to normalize
+  end
+
   local cutoff = params:get("cutoff")
   local artic = step_data.artic
   local slide = params:get("slide_time")
@@ -672,8 +723,10 @@ local function step_advance()
       if math.random(100) <= fill_probability then
         generate_fill()
       end
+      -- Phrase boundary flash
+      phrase_flash = 0.3  -- flash duration
     end
-    
+
     -- Check for pending call-and-response
     if response_pending then
       generate_response()
@@ -743,7 +796,18 @@ local function init_params()
   params:add_number("pattern_length", "pattern length", 1, 16, pattern_length)
   params:set_action("pattern_length", function(v) pattern_length = v; screen_dirty = true end)
 
-  params:add_group("SOUND", 9)
+  params:add_group("SOUND", 11)
+  params:add_option("style", "artist mode", {"lcd", "flea", "daft", "custom"}, 4)
+  params:set_action("style", function(v)
+    style = {"lcd", "flea", "daft", "custom"}[v]
+    if STYLE_PRESETS[style] then
+      local preset = STYLE_PRESETS[style]
+      -- Apply preset parameters
+      pocket_lock = 100 - (preset.density * 30)  -- convert density to variation
+      local range_idx = clamp(math.floor(preset.range / 4), 1, 7)
+    end
+    screen_dirty = true
+  end)
   params:add_number("root_note", "root note", 24, 60, root_note)
   params:set_action("root_note", function(v)
     root_note = v; build_scale(); screen_dirty = true
@@ -759,8 +823,8 @@ local function init_params()
     controlspec.new(0, 1, 'lin', 0, 0.3))
   params:set_action("resonance", function(v) engine.resonance(v) end)
   params:add_control("drive", "drive",
-    controlspec.new(0, 1, 'lin', 0, 0.3))
-  params:set_action("drive", function(v) engine.drive(v) end)
+    controlspec.new(0, 1, 'lin', 0, 0.0))
+  params:set_action("drive", function(v) drive = v; screen_dirty = true end)
   params:add_control("sub_mix", "sub mix",
     controlspec.new(0, 1, 'lin', 0, 0.7))
   params:set_action("sub_mix", function(v) engine.sub_mix(v) end)
@@ -774,7 +838,12 @@ local function init_params()
     controlspec.new(0.01, 0.5, 'exp', 0, 0.05, "s"))
   params:set_action("slide_time", function(v) engine.slide_time(v) end)
 
-  params:add_group("ARCS", 4)
+  params:add_group("ARCS", 5)
+  params:add_option("clock_source", "clock", {"internal", "midi"}, 1)
+  params:set_action("clock_source", function(v)
+    clock_source = v == 1 and "internal" or "midi"
+    screen_dirty = true
+  end)
   params:add_number("arc_speed", "arc speed (bars)", 1, 64, arc_speed)
   params:set_action("arc_speed", function(v) arc_speed = v; screen_dirty = true end)
   params:add_option("arc_shape", "arc shape", ARC_SHAPES, arc_shape)
@@ -981,25 +1050,34 @@ local function draw_live_zone()
   -- ZONE 2: y 9-52
   -- Draw 16-step bass sequence as melodic contour
   local pat = live_patterns[current_bank]
-  
+
   local x_start = 2
   local x_step = 8
   local y_top = 10
   local y_bottom = 48
   local pitch_range = 36
-  
+
+  -- Phrase boundary flash indicator
+  if phrase_flash > 0 then
+    phrase_flash = phrase_flash - (1/12)
+    local flash_level = math.floor(phrase_flash * 15)
+    screen.level(flash_level)
+    screen.rect(0, y_top - 2, 128, 4)
+    screen.fill()
+  end
+
   -- Points for contour line
   local points = {}
-  
+
   for s = 1, pattern_length do
     local sd = pat[s]
     local x = x_start + (s - 1) * x_step
-    
+
     if sd.note > 0 and sd.artic ~= ARTIC.REST then
       local note_offset = sd.note - (root_note - 12)
       local y = y_bottom - (note_offset / pitch_range) * (y_bottom - y_top)
       y = clamp(y, y_top, y_bottom - 2)
-      
+
       table.insert(points, {x = x, y = y, step = s, data = sd})
     end
   end
@@ -1020,11 +1098,11 @@ local function draw_live_zone()
   for _, p in ipairs(points) do
     local level = 12  -- default active step
     local size = 2
-    
+
     if p.step == current_step and playing then
       level = 15  -- playhead is brightest
     end
-    
+
     if p.data.artic == ARTIC.GHOST then
       level = 6   -- ghost notes are dim
       size = 1
@@ -1032,10 +1110,17 @@ local function draw_live_zone()
       level = 15  -- accents are bright
       size = 3
     end
-    
+
     screen.level(level)
     screen.rect(p.x - size/2, p.y - size/2, size, size)
     screen.fill()
+  end
+
+  -- Draw phrase boundary marker (▸) at phrase positions
+  if bar_in_phrase == 1 and bar_count > 0 then
+    screen.level(8)
+    screen.move(2, y_bottom + 5)
+    screen.text("▸")  -- right-pointing triangle at phrase start
   end
   
   -- TENSION ARC: thin horizontal bar at y ~48-50
