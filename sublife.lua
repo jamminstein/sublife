@@ -75,6 +75,7 @@ local seq_sprocket
 local metro_redraw
 
 local playing = false
+local screen_clock_id = nil
 local current_step = 0
 local current_bank = 1
 local pattern_length = 16
@@ -1378,7 +1379,7 @@ function init()
   if my_lattice then
     my_lattice:start()
   end
-  clock.run(screen_refresh)
+  screen_clock_id = clock.run(screen_refresh)
 
   g.key = g.key
   grid_redraw()
@@ -1392,5 +1393,6 @@ function cleanup()
   if my_lattice then
     my_lattice:destroy()
   end
-  clock.cancel_all()
+  if screen_clock_id then clock.cancel(screen_clock_id) end
+  if m then for ch=1,16 do m:cc(123,0,ch) end end
 end
