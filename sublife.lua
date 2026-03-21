@@ -1012,7 +1012,9 @@ g.key = function(x, y, z)
         current_step = 0
         bar_count = 0
         bar_in_phrase = 0
-        my_lattice:hard_restart()
+        if my_lattice then
+          my_lattice:hard_restart()
+        end
       end
     end
   end
@@ -1268,7 +1270,9 @@ function key(n, z)
         current_step = 0
         bar_count = 0
         bar_in_phrase = 0
-        my_lattice:hard_restart()
+        if my_lattice then
+          my_lattice:hard_restart()
+        end
       end
     end
   elseif n == 3 then
@@ -1317,7 +1321,9 @@ function init()
   init_params()
   init_lattice()
   init_midi()
-  my_lattice:start()
+  if my_lattice then
+    my_lattice:start()
+  end
   clock.run(screen_refresh)
 
   g.key = g.key
@@ -1328,6 +1334,8 @@ end
 function cleanup()
   playing = false
   engine.note_off()
-  if my_lattice then my_lattice:destroy() end
+  if my_lattice then
+    my_lattice:destroy()
+  end
   clock.cancel_all()
 end
