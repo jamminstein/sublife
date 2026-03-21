@@ -838,7 +838,7 @@ local function init_params()
   params:add_group("SOUND", 11)
   params:add_option("style", "artist mode", {"lcd", "flea", "daft", "custom"}, 4)
   params:set_action("style", function(v)
-    style = {"lcd", "flea", "daft", "custom"}[v]
+    style = ({"lcd", "flea", "daft", "custom"})[v]
     if STYLE_PRESETS[style] then
       local preset = STYLE_PRESETS[style]
       -- Apply preset parameters
