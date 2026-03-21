@@ -133,6 +133,36 @@ local call_buffer = {}      -- stores incoming MIDI notes
 local call_active = false
 local response_pending = false
 
+-- OP-XY MIDI
+local opxy_out = nil
+local opxy_enabled = false
+local opxy_device = 1
+local opxy_channel = 2  -- OP-XY bass channel
+
+local function opxy_note_on(note, vel)
+  if opxy_out and opxy_enabled then
+    opxy_out:note_on(note, vel, opxy_channel)
+  end
+end
+
+local function opxy_note_off(note)
+  if opxy_out and opxy_enabled then
+    opxy_out:note_off(note, 0, opxy_channel)
+  end
+end
+
+local function opxy_cc(cc_num, val)
+  if opxy_out and opxy_enabled then
+    opxy_out:cc(cc_num, math.floor(util.clamp(val, 0, 127)), opxy_channel)
+  end
+end
+
+local function opxy_all_notes_off()
+  if opxy_out and opxy_enabled then
+    opxy_out:cc(123, 0, opxy_channel)
+  end
+end
+
 -- screen state
 local screen_dirty = true
 local selected_param = 1
@@ -700,11 +730,13 @@ local function note_on(step_data)
   local slide = params:get("slide_time")
 
   engine.note_on(freq, vel, cutoff, artic, slide)
+  opxy_note_on(step_data.note, step_data.vel)
 
   local step_dur = clock.get_beat_sec() / 4
   clock.run(function()
     clock.sleep(step_dur * step_data.dur)
     engine.note_off()
+    opxy_note_off(step_data.note)
   end)
 end
 
@@ -757,6 +789,11 @@ local function step_advance()
   else
     note_on(step_data)
   end
+
+  -- Send OP-XY envelope and level CCs
+  local filt_env = params:get("filt_env_amt") or 0
+  opxy_cc(24, util.linlin(0, 8000, 0, 127, filt_env))  -- Filter env attack
+  opxy_cc(51, util.linlin(0, 1, 0, 127, params:get("sub_mix") or 0.7))  -- Level/mix
 
   screen_dirty = true
   grid_dirty = true
@@ -862,6 +899,21 @@ local function init_params()
   params:add_control("comp_ratio", "comp ratio",
     controlspec.new(1, 10, 'lin', 0, 3))
   params:set_action("comp_ratio", function(v) engine.comp_ratio(v) end)
+
+  params:add_group("OP-XY", 3)
+  params:add_option("opxy_enabled", "OP-XY output", {"off", "on"}, 1)
+  params:set_action("opxy_enabled", function(x) 
+    opxy_enabled = (x == 2)
+    if opxy_out == nil then
+      opxy_out = midi.connect(params:get("opxy_device"))
+    end
+  end)
+  params:add_number("opxy_device", "OP-XY MIDI device", 1, 4, 1)
+  params:set_action("opxy_device", function(val)
+    opxy_out = midi.connect(val)
+  end)
+  params:add_number("opxy_channel", "OP-XY channel", 1, 8, 2)
+  params:set_action("opxy_channel", function(x) opxy_channel = x end)
 end
 
 ----------------------------------------------------------------
@@ -1006,6 +1058,7 @@ g.key = function(x, y, z)
       if playing then
         playing = false
         engine.note_off()
+        opxy_all_notes_off()
         current_step = 0
       else
         playing = true
@@ -1264,6 +1317,7 @@ function key(n, z)
       if playing then
         playing = false
         engine.note_off()
+        opxy_all_notes_off()
         current_step = 0
       else
         playing = true
@@ -1334,6 +1388,7 @@ end
 function cleanup()
   playing = false
   engine.note_off()
+  opxy_all_notes_off()
   if my_lattice then
     my_lattice:destroy()
   end
