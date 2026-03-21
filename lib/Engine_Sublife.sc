@@ -147,7 +147,7 @@ Engine_Sublife : CroneEngine {
       filt_freq = filt_freq.clip(30, 16000);
 
       // -- Moog-style filter --
-      sig = MoogFF.ar(sig, filt_freq, res * 4);
+      sig = MoogFF.ar(sig, filt_freq, (res * 4).min(3.4));
 
       // -- Drive / saturation --
       sig = (sig * (1 + (drive * 8))).tanh;
