@@ -24,6 +24,8 @@ engine.name = "Sublife"
 local musicutil = require "musicutil"
 local lattice_lib = require "lattice"
 
+local grid_dirty = true
+
 ----------------------------------------------------------------
 -- CONSTANTS
 ----------------------------------------------------------------
@@ -919,8 +921,6 @@ end
 ----------------------------------------------------------------
 -- GRID
 ----------------------------------------------------------------
-
-local grid_dirty = true
 
 local function grid_redraw()
   if not g.device then return end
