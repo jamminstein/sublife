@@ -1141,7 +1141,7 @@ local function draw_live_zone()
   -- Draw contour line with antialiasing
   if #points > 1 then
     screen.level(8)
-    screen.aa(1)
+    screen.aa(0)
     for i = 1, #points - 1 do
       screen.move(points[i].x, points[i].y)
       screen.line(points[i + 1].x, points[i + 1].y)
